@@ -12,7 +12,12 @@ public sealed class ReceiverEngine : IDisposable
     readonly UdpClient udp;
     readonly Thread thread;
     readonly int targetLatencyMs;     // ジッタ吸収バッファ
-    readonly int maxLatencyMs;        // これを超えたら古い音を捨てる
+    readonly int maxLatencyMs;        // これを超えたら古い音を捨てる（急なまとめ届き対策）
+
+    /// <summary>再生デバイス側のバッファ(ms)</summary>
+    const int OutputLatencyMs = 20;
+    /// <summary>この間隔ごとにバッファの最低水位を見て、溜まりすぎなら1パケット捨てる（クロック差対策）</summary>
+    const int DriftWindowMs = 1000;
 
     long received, lost, dropped;
     double bufferedMs;
@@ -33,7 +38,7 @@ public sealed class ReceiverEngine : IDisposable
     {
         Port = port;
         this.targetLatencyMs = targetLatencyMs;
-        maxLatencyMs = targetLatencyMs + 120;
+        maxLatencyMs = targetLatencyMs + Math.Max(40, targetLatencyMs);
         udp = new UdpClient(new IPEndPoint(IPAddress.Any, port));
         udp.Client.ReceiveTimeout = 500;
         thread = new Thread(Run) { IsBackground = true, Name = "LanAudio receiver" };
@@ -48,12 +53,15 @@ public sealed class ReceiverEngine : IDisposable
 
     void Run()
     {
+        AudioThreadPriority.EnsureCurrentThread();
         WasapiOut? output = null;
         BufferedWaveProvider? buffer = null;
         int curRate = 0, curCh = 0;
         bool playing = false;
         bool haveSeq = false;
         uint lastSeq = 0;
+        double windowMinMs = double.MaxValue;
+        long windowStart = Environment.TickCount64;
         var remote = new IPEndPoint(IPAddress.Any, 0);
 
         try
@@ -88,8 +96,8 @@ public sealed class ReceiverEngine : IDisposable
                         DiscardOnBufferOverflow = true,
                         ReadFully = true,          // 足りないときは無音で埋める
                     };
-                    output = new WasapiOut(AudioClientShareMode.Shared, true, 20);
-                    output.Init(buffer);
+                    output = new WasapiOut(AudioClientShareMode.Shared, true, OutputLatencyMs);
+                    output.Init(new PrioritizedProvider(buffer));
                     curRate = rate; curCh = ch;
                     playing = false; haveSeq = false;
                 }
@@ -106,11 +114,37 @@ public sealed class ReceiverEngine : IDisposable
                 lastSeq = seq; haveSeq = true;
                 Interlocked.Increment(ref received);
 
-                // 遅延が溜まりすぎたら捨てる（送信側と受信側のクロック差対策）
-                if (buffer!.BufferedDuration.TotalMilliseconds > maxLatencyMs)
+                double levelMs = buffer!.BufferedDuration.TotalMilliseconds;
+
+                // 遅延が大きく溜まったら捨てる（ネットワークの詰まり後のまとめ届き等）
+                if (levelMs > maxLatencyMs)
                 {
                     Interlocked.Increment(ref dropped);
                     continue;
+                }
+
+                // 送信側と受信側のクロック差で少しずつ溜まる遅延を戻す:
+                // 一定時間のあいだ一度も目標を下回らなかった（＝常に余っている）なら1パケット捨てる
+                if (playing)
+                {
+                    windowMinMs = Math.Min(windowMinMs, levelMs);
+                    long now = Environment.TickCount64;
+                    if (now - windowStart >= DriftWindowMs)
+                    {
+                        bool excess = windowMinMs > targetLatencyMs;
+                        windowMinMs = double.MaxValue;
+                        windowStart = now;
+                        if (excess)
+                        {
+                            Interlocked.Increment(ref dropped);
+                            continue;
+                        }
+                    }
+                }
+                else
+                {
+                    windowMinMs = double.MaxValue;
+                    windowStart = Environment.TickCount64;
                 }
                 buffer.AddSamples(pcm.ToArray(), 0, pcm.Length);
                 Volatile.Write(ref bufferedMs, buffer.BufferedDuration.TotalMilliseconds);
@@ -131,5 +165,19 @@ public sealed class ReceiverEngine : IDisposable
         {
             output?.Dispose();
         }
+    }
+}
+
+/// <summary>再生スレッド（NAudio 内部）で最初に読まれたときにそのスレッドを優先させるラッパー</summary>
+sealed class PrioritizedProvider : IWaveProvider
+{
+    readonly IWaveProvider source;
+    public PrioritizedProvider(IWaveProvider source) => this.source = source;
+    public WaveFormat WaveFormat => source.WaveFormat;
+
+    public int Read(byte[] buffer, int offset, int count)
+    {
+        AudioThreadPriority.EnsureCurrentThread();
+        return source.Read(buffer, offset, count);
     }
 }

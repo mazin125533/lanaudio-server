@@ -7,7 +7,7 @@ namespace LanAudio.Receiver;
 sealed class AppSettings
 {
     public int Port { get; set; } = AudioPacket.DefaultPort;
-    public int TargetLatencyMs { get; set; } = 60;
+    public int TargetLatencyMs { get; set; } = 40;
     /// <summary>アプリ起動時に受信を開始する</summary>
     public bool AutoStart { get; set; } = true;
 

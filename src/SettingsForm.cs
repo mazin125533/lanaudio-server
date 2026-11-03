@@ -3,7 +3,7 @@
 sealed class SettingsForm : Form
 {
     readonly NumericUpDown port = new() { Minimum = 1024, Maximum = 65535, Width = 120 };
-    readonly NumericUpDown latency = new() { Minimum = 20, Maximum = 1000, Increment = 10, Width = 120 };
+    readonly NumericUpDown latency = new() { Minimum = 10, Maximum = 1000, Increment = 10, Width = 120 };
     readonly CheckBox autoStart = new() { Text = "アプリ起動時に受信を開始する", AutoSize = true };
     readonly CheckBox startup = new() { Text = "Windows 起動時にアプリを起動する", AutoSize = true };
 
@@ -37,7 +37,7 @@ sealed class SettingsForm : Form
         AddRow(table, "目標遅延 (ms)", latency);
         AddWide(table, new Label
         {
-            Text = "音が途切れる場合は 100〜150ms に増やしてください",
+            Text = "低いほど遅延が減ります。途切れる場合は増やしてください（有線LAN: 20〜40 / Wi-Fi: 60〜100）",
             AutoSize = true,
             ForeColor = SystemColors.GrayText,
             Margin = new Padding(3, 0, 3, 8),
